@@ -45,20 +45,27 @@ curl -N --no-buffer -X POST "http://localhost:8000/transcribe" \
   -F "stream=true"
 ```
 
-### MLX-Whisper (Alternative)
+### MLX-Whisper with Universal Media Support
 ```bash
-curl -N --no-buffer -X POST "http://localhost:8000/transcribe/mlx" \
-  -F "file=@audio.mp3" \
-  -F "model=turbo" \
-  -F "language=it" \
-  -F "stream=true"
-```
+# Local file
+curl -X POST "http://localhost:8000/transcribe/mlx" \
+  -F "media=@audio.mp3" \
+  -F "model=turbo"
 
-### Transcribe from URL (YouTube, etc.)
-```bash
-curl -X POST "http://localhost:8000/transcribe/url" \
-  -F "url=https://youtube.com/watch?v=..." \
+# YouTube video
+curl -X POST "http://localhost:8000/transcribe/mlx" \
+  -F "media=https://youtu.be/KygDdSZbGZk" \
   -F "model=medium"
+
+# YouTube playlist
+curl -X POST "http://localhost:8000/transcribe/mlx" \
+  -F "media=https://youtube.com/playlist?list=..." \
+  -F "model=small"
+
+# Remote audio URL
+curl -X POST "http://localhost:8000/transcribe/mlx" \
+  -F "media=https://server.com/audio.mp3" \
+  -F "model=turbo"
 ```
 
 ## 📊 API Endpoints
@@ -67,9 +74,8 @@ curl -X POST "http://localhost:8000/transcribe/url" \
 - `GET /` - Health check
 - `GET /health` - Detailed health status with MLX status
 - `GET /models` - List available models for both frameworks
-- `POST /transcribe` - **Lightning Whisper MLX** (fastest)
-- `POST /transcribe/mlx` - **MLX-Whisper** (alternative)
-- `POST /transcribe/url` - Transcribe from URL (YouTube, etc.)
+- `POST /transcribe` - **Lightning Whisper MLX** (fastest, file upload only)
+- `POST /transcribe/mlx` - **MLX-Whisper** (supports media parameter: files, YouTube, remote URLs)
 
 ### Model Management
 - `POST /models/preload` - Preload model to cache for faster first use
@@ -96,9 +102,10 @@ Copy `.env.example` to `.env` and customize:
 cp .env.example .env
 ```
 
-## 🎯 Supported Formats
+## 🎯 Supported Inputs
 
-Audio: MP3, WAV, M4A, FLAC, OGG, MP4, MOV
+**Audio Formats**: MP3, WAV, M4A, FLAC, OGG, MP4, MOV
+**Media Sources**: Local files, YouTube videos/playlists, remote audio URLs
 
 ## 📈 Response Format
 

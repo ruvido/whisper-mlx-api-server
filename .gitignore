@@ -53,3 +53,15 @@ temp/
 *.flac
 *.mp4
 *.mov
+*.webm
+
+# Downloaded media files and YouTube content
+downloads/
+youtube_downloads/
+# Playlist folders (created dynamically based on playlist names)
+*/
+# But allow essential directories
+!src/
+!docs/
+!tests/
+!.github/

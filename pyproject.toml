@@ -9,6 +9,7 @@ dependencies = [
     "lightning-whisper-mlx",
     "python-multipart",
     "mlx-whisper>=0.4.3",
+    "yt-dlp>=2024.10.22",
 ]
 
 [tool.hatch.build.targets.wheel]

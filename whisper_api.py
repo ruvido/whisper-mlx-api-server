@@ -15,11 +15,13 @@ import io
 import threading
 import queue
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
+from urllib.parse import urlparse, parse_qs
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -344,6 +346,173 @@ def generate_markdown(result: dict, model: str, processing_time: float, filename
 
     return "\n".join(md_content)
 
+
+# =============================================================================
+# Media Type Detection and Download Functions
+# =============================================================================
+
+def detect_media_type(media: str) -> str:
+    """
+    Detect media type from input string
+    Returns: 'local_file', 'youtube_video', 'youtube_playlist', 'remote_audio'
+    """
+    # Check if it's a local file path
+    if os.path.exists(media) or not media.startswith(('http://', 'https://')):
+        return 'local_file'
+
+    # Parse URL
+    parsed = urlparse(media)
+
+    # Check for YouTube URLs
+    if parsed.netloc in ['youtube.com', 'www.youtube.com', 'youtu.be', 'www.youtu.be']:
+        # Check if it's a playlist
+        if 'list=' in media:
+            return 'youtube_playlist'
+        else:
+            return 'youtube_video'
+
+    # Check for common audio file extensions in URL
+    path = parsed.path.lower()
+    audio_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.mp4', '.mov', '.webm']
+    if any(path.endswith(ext) for ext in audio_extensions):
+        return 'remote_audio'
+
+    # Default to remote audio for other HTTP URLs
+    return 'remote_audio'
+
+
+def safe_filename(name: str) -> str:
+    """Convert string to safe filename by removing/replacing invalid characters"""
+    # Remove or replace invalid characters
+    name = re.sub(r'[<>:"/\\|?*]', '-', name)
+    name = re.sub(r'[^\w\s\-_.,()[\]]', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    # Limit length
+    if len(name) > 100:
+        name = name[:100]
+    return name
+
+
+def download_youtube_audio(url: str, output_dir: str = ".") -> Dict[str, Any]:
+    """
+    Download audio from YouTube URL or playlist
+    Returns dict with downloaded file info
+    """
+    try:
+        import yt_dlp
+
+        # Detect if it's a playlist
+        media_type = detect_media_type(url)
+
+        if media_type == 'youtube_playlist':
+            # Get playlist info first
+            with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
+                playlist_info = ydl.extract_info(url, download=False)
+                playlist_title = safe_filename(playlist_info.get('title', 'playlist'))
+                playlist_dir = os.path.join(output_dir, playlist_title)
+                os.makedirs(playlist_dir, exist_ok=True)
+
+            # Download all videos in playlist
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(playlist_dir, '%(title)s.%(ext)s'),
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url)
+
+            return {
+                'type': 'playlist',
+                'title': playlist_title,
+                'directory': playlist_dir,
+                'count': len(info.get('entries', [])),
+                'files': [os.path.join(playlist_dir, f"{safe_filename(entry.get('title', 'video'))}.mp3")
+                         for entry in info.get('entries', []) if entry]
+            }
+
+        else:
+            # Single video download
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url)
+                title = safe_filename(info.get('title', 'video'))
+                filename = os.path.join(output_dir, f"{title}.mp3")
+
+            return {
+                'type': 'single',
+                'title': title,
+                'filename': filename,
+                'duration': info.get('duration', 0)
+            }
+
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="yt-dlp not available. Install with: uv add yt-dlp"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"YouTube download failed: {str(e)}"
+        )
+
+
+def download_remote_audio(url: str, output_dir: str = ".") -> str:
+    """Download remote audio file and return local path"""
+    try:
+        import requests
+
+        # Get filename from URL
+        parsed = urlparse(url)
+        filename = os.path.basename(parsed.path)
+
+        if not filename or '.' not in filename:
+            filename = "remote_audio.mp3"
+
+        local_path = os.path.join(output_dir, filename)
+
+        # Download file
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+
+        with open(local_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        return local_path
+
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="requests library not available. Install with: uv add requests"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Remote audio download failed: {str(e)}"
+        )
+
+
+# =============================================================================
+# API Endpoints
+# =============================================================================
+
 @app.get("/")
 async def root():
     """Health check endpoint"""
@@ -667,25 +836,25 @@ async def transcribe_audio(
 
     # Format response based on requested format
     if response_format == "text":
-        return result.get('text', '')
+        return PlainTextResponse(result.get('text', ''))
     elif response_format == "srt":
         segments = result.get('segments', [])
         if segments:
-            return generate_srt(segments)
+            return PlainTextResponse(generate_srt(segments))
         else:
             # Fallback for models without segment info
             text = result.get('text', '')
-            return f"1\n00:00:00,000 --> 00:00:10,000\n{text}\n"
+            return PlainTextResponse(f"1\n00:00:00,000 --> 00:00:10,000\n{text}\n")
     elif response_format == "vtt":
         segments = result.get('segments', [])
         if segments:
-            return generate_vtt(segments)
+            return PlainTextResponse(generate_vtt(segments))
         else:
             # Fallback for models without segment info
             text = result.get('text', '')
-            return f"WEBVTT\n\n00:00:00.000 --> 00:00:10.000\n{text}\n"
+            return PlainTextResponse(f"WEBVTT\n\n00:00:00.000 --> 00:00:10.000\n{text}\n")
     elif response_format == "md" or response_format == "markdown":
-        return generate_markdown(result, model, processing_time, filename=file.filename)
+        return PlainTextResponse(generate_markdown(result, model, processing_time, filename=file.filename))
     else:
         # Enhanced JSON format (default)
         response_data = {
@@ -707,7 +876,8 @@ async def transcribe_audio(
 
 @app.post("/transcribe/mlx")
 async def transcribe_audio_mlx(
-    file: UploadFile = File(...),
+    media: Optional[str] = Form(None),
+    file: Optional[UploadFile] = None,
     model: Optional[str] = Form("medium"),
     language: Optional[str] = Form(None),
     temperature: Optional[float] = Form(0.0),
@@ -716,120 +886,297 @@ async def transcribe_audio_mlx(
     stream: Optional[bool] = Form(False)
 ):
     """
-    Transcribe audio file using MLX-Whisper standard with support for custom models
+    Transcribe audio using MLX-Whisper with automatic media detection
 
-    - **file**: Audio file to transcribe (mp3, wav, m4a, flac, ogg, mp4, mov)
-    - **model**: Whisper model to use or HuggingFace model path (e.g., 'bofenghuang/whisper-large-v3-distil-it-v0.2')
+    - **media**: Universal media input - supports:
+        * Local file paths (e.g., "audio.mp3")
+        * YouTube videos (e.g., "https://youtu.be/KygDdSZbGZk")
+        * YouTube playlists (e.g., "https://youtube.com/playlist?list=...")
+        * Remote audio URLs (e.g., "https://server.com/audio.mp3")
+    - **file**: Deprecated - use media parameter instead
+    - **model**: Whisper model to use (tiny, small, medium, large, turbo) or HuggingFace model path
     - **language**: Source language (auto-detected if not specified)
     - **temperature**: Sampling temperature (0.0 = deterministic)
     - **response_format**: Output format (json, text, srt, vtt, md/markdown)
     - **stream**: Enable live progress streaming (use with `curl -N --no-buffer`)
-    **Custom Models**: Supports HuggingFace models like 'bofenghuang/whisper-large-v3-distil-it-v0.2'
-    **Performance**: Optimized for Apple Silicon with MLX acceleration
+
+    **Examples:**
+    ```bash
+    # Local file
+    curl -X POST "http://localhost:8000/transcribe/mlx" -F "media=audio.mp3" -F "model=turbo"
+
+    # YouTube video
+    curl -X POST "http://localhost:8000/transcribe/mlx" -F "media=https://youtu.be/KygDdSZbGZk" -F "model=medium"
+
+    # Remote audio
+    curl -X POST "http://localhost:8000/transcribe/mlx" -F "media=https://server.com/audio.mp3" -F "model=small"
+    ```
     """
     start_time = time.time()
 
-    # Read file content first (needed for both streaming and normal mode)
-    file_content = await file.read()
+    # Handle backward compatibility: if file is provided but media is not, use file
+    if media is None and file is not None:
+        media_input = file
+        media_type = 'local_file'
+        media_name = file.filename
+    elif isinstance(media, str):
+        # String input: could be URL or local file path
+        media_type = detect_media_type(media)
+        media_input = media
+        media_name = media
+    elif hasattr(media, 'filename'):
+        # UploadFile passed as media
+        media_input = media
+        media_type = 'local_file'
+        media_name = media.filename
+    else:
+        raise HTTPException(status_code=400, detail="No media input provided. Use 'media' parameter for files, URLs, or YouTube links.")
 
-    # Se streaming è abilitato, usa un generatore per i messaggi live
+    # Read file content first if it's an UploadFile (needed for both streaming and normal mode)
+    file_content = None
+    file_ext = None
+    if media_type == 'local_file' and hasattr(media_input, 'read'):
+        file_content = await media_input.read()
+        file_ext = Path(media_input.filename).suffix.lower() if media_input.filename else '.mp3'
+
     if stream:
         def transcribe_generator_mlx():
-            # Validate file
-            if not file.filename:
-                yield "❌ Error: No file provided\n"
-                return
+            temp_files_to_cleanup = []
+            temp_dirs_to_cleanup = []
 
-            file_ext = Path(file.filename).suffix.lower()
-            if file_ext not in SUPPORTED_FORMATS:
-                yield f"❌ Error: Unsupported format: {file_ext}\n"
-                return
-
-            yield f"📁 File: {file.filename} ({format_size(len(file_content))})\n"
-            yield f"🤖 Model: {model} (MLX-Whisper)\n"
-            if language:
-                yield f"🗣️  Language: {language}\n"
-            yield "\n"
-
-            # Check file size
-            if len(file_content) > MAX_FILE_SIZE:
-                yield f"❌ Error: File too large: {format_size(len(file_content))}\n"
-                return
-
-            # MLX-Whisper loads models automatically during transcription
-            yield "🔄 MLX-Whisper ready...\n"
-
-            yield "\n🎯 Starting transcription...\n"
-
-            # Transcribe
             try:
-                # Create temp file without auto-deletion
-                tmp_file = tempfile.NamedTemporaryFile(suffix=file_ext, delete=False)
-                try:
-                    tmp_file.write(file_content)
-                    tmp_file.flush()
-                    tmp_file.close()  # Close the file handle
+                yield f"🎯 Media Type: {media_type}\n"
+                yield f"📁 Input: {media_name}\n"
+                yield f"🤖 Model: {model} (MLX-Whisper)\n"
+                if language:
+                    yield f"🗣️  Language: {language}\n"
+                yield "\n"
 
-                    # Prepare transcription options
-                    transcribe_options = {}
-                    if language:
-                        transcribe_options['language'] = language
-                    if temperature != 0.0:
-                        transcribe_options['temperature'] = temperature
+                # Step 1: Process different media types and get local file path(s)
+                audio_files = []
 
-                    yield "🔄 Processing audio...\n"
+                if media_type == 'local_file':
+                    # Handle uploaded file
+                    if hasattr(media_input, 'read'):
+                        # It's an UploadFile - file_content was already read above
 
-                    # Transcribe using MLX-Whisper - EXACTLY as in official docs
-                    import mlx_whisper
+                        # Validate file format
+                        if file_ext not in SUPPORTED_FORMATS:
+                            yield f"❌ Error: Unsupported format: {file_ext}\n"
+                            return
 
-                    # Map model name to MLX-Whisper format
-                    mlx_model = MLX_WHISPER_MODEL_MAPPING.get(model, model)
-                    yield f"🔧 Using MLX model: {mlx_model}\n"
+                        # Check file size
+                        if len(file_content) > MAX_FILE_SIZE:
+                            yield f"❌ Error: File too large: {format_size(len(file_content))}\n"
+                            return
 
-                    # OFFICIAL DOCS EXAMPLE - NO extra parameters, just the essentials
-                    if language:
-                        result = mlx_whisper.transcribe(
-                            tmp_file.name,
-                            path_or_hf_repo=mlx_model,
-                            language=language
-                        )
+                        # Create temporary file
+                        tmp_file = tempfile.NamedTemporaryFile(suffix=file_ext, delete=False)
+                        temp_files_to_cleanup.append(tmp_file.name)
+                        tmp_file.write(file_content)
+                        tmp_file.flush()
+                        tmp_file.close()
+
+                        audio_files.append(tmp_file.name)
+                        yield f"📁 File uploaded: {media_input.filename} ({format_size(len(file_content))})\n"
+
                     else:
-                        result = mlx_whisper.transcribe(
-                            tmp_file.name,
-                            path_or_hf_repo=mlx_model
-                        )
+                        # It's a local file path
+                        if not os.path.exists(media_input):
+                            yield f"❌ Error: File not found: {media_input}\n"
+                            return
 
-                finally:
-                    # Clean up AFTER transcription is done
-                    if os.path.exists(tmp_file.name):
-                        os.unlink(tmp_file.name)
+                        # Check file size
+                        file_size = os.path.getsize(media_input)
+                        if file_size > MAX_FILE_SIZE:
+                            yield f"❌ Error: File too large: {format_size(file_size)}\n"
+                            return
+
+                        audio_files.append(media_input)
+                        yield f"📁 Local file: {media_input} ({format_size(file_size)})\n"
+
+                elif media_type == 'youtube_video':
+                    yield "🔄 Downloading YouTube video...\n"
+                    try:
+                        # Create temp directory for downloads
+                        temp_dir = tempfile.mkdtemp()
+                        temp_dirs_to_cleanup.append(temp_dir)
+
+                        download_result = download_youtube_audio(media_input, temp_dir)
+                        if download_result['type'] == 'single':
+                            audio_files.append(download_result['filename'])
+                            temp_files_to_cleanup.append(download_result['filename'])
+                            yield f"✅ Downloaded: {download_result['title']}\n"
+                        else:
+                            yield f"❌ Error: Expected single video but got {download_result['type']}\n"
+                            return
+                    except Exception as e:
+                        yield f"❌ YouTube download failed: {str(e)}\n"
+                        return
+
+                elif media_type == 'youtube_playlist':
+                    yield "🔄 Downloading YouTube playlist...\n"
+                    try:
+                        # Create temp directory for downloads
+                        temp_dir = tempfile.mkdtemp()
+                        temp_dirs_to_cleanup.append(temp_dir)
+
+                        download_result = download_youtube_audio(media_input, temp_dir)
+                        if download_result['type'] == 'playlist':
+                            audio_files.extend(download_result['files'])
+                            temp_files_to_cleanup.extend(download_result['files'])
+                            yield f"✅ Downloaded {download_result['count']} videos from playlist: {download_result['title']}\n"
+                        else:
+                            yield f"❌ Error: Expected playlist but got {download_result['type']}\n"
+                            return
+                    except Exception as e:
+                        yield f"❌ Playlist download failed: {str(e)}\n"
+                        return
+
+                elif media_type == 'remote_audio':
+                    yield "🔄 Downloading remote audio...\n"
+                    try:
+                        # Create temp directory for downloads
+                        temp_dir = tempfile.mkdtemp()
+                        temp_dirs_to_cleanup.append(temp_dir)
+
+                        downloaded_file = download_remote_audio(media_input, temp_dir)
+                        audio_files.append(downloaded_file)
+                        temp_files_to_cleanup.append(downloaded_file)
+
+                        file_size = os.path.getsize(downloaded_file)
+                        yield f"✅ Downloaded: {os.path.basename(downloaded_file)} ({format_size(file_size)})\n"
+
+                        # Check file size after download
+                        if file_size > MAX_FILE_SIZE:
+                            yield f"❌ Error: Downloaded file too large: {format_size(file_size)}\n"
+                            return
+
+                    except Exception as e:
+                        yield f"❌ Remote audio download failed: {str(e)}\n"
+                        return
+
+                else:
+                    yield f"❌ Error: Unsupported media type: {media_type}\n"
+                    return
+
+                # Step 2: Transcribe all audio files
+                yield f"\n🎯 Starting transcription of {len(audio_files)} file(s)...\n"
+
+                # Import MLX-Whisper
+                import mlx_whisper
+
+                # Map model name to MLX-Whisper format
+                mlx_model = MLX_WHISPER_MODEL_MAPPING.get(model, model)
+                yield f"🔧 Using MLX model: {mlx_model}\n\n"
+
+                all_results = []
+
+                for i, audio_file in enumerate(audio_files, 1):
+                    if len(audio_files) > 1:
+                        filename = os.path.basename(audio_file)
+                        yield f"📝 Processing file {i}/{len(audio_files)}: {filename}\n"
+
+                    try:
+                        # Prepare transcription options
+                        transcribe_options = {
+                            'path_or_hf_repo': mlx_model
+                        }
+                        if language:
+                            transcribe_options['language'] = language
+                        if temperature != 0.0:
+                            transcribe_options['temperature'] = temperature
+
+                        # Add word_timestamps for SRT/VTT support
+                        if response_format in ["srt", "vtt"]:
+                            transcribe_options['word_timestamps'] = True
+
+                        yield "🔄 Processing audio...\n"
+
+                        # Transcribe using MLX-Whisper
+                        result = mlx_whisper.transcribe(audio_file, **transcribe_options)
+
+                        # Add file info to result
+                        result['source_file'] = os.path.basename(audio_file)
+                        all_results.append(result)
+
+                        if len(audio_files) > 1:
+                            yield f"✅ Completed file {i}/{len(audio_files)}\n"
+
+                    except Exception as e:
+                        yield f"❌ Transcription failed for {os.path.basename(audio_file)}: {str(e)}\n"
+                        continue
+
+                if not all_results:
+                    yield "❌ No files were successfully transcribed\n"
+                    return
 
                 processing_time = time.time() - start_time
-                yield "✅ Transcription completed!\n"
-                yield f"⏱️  Processing time: {processing_time:.2f}s\n"
+                yield "✅ All transcriptions completed!\n"
+                yield f"⏱️  Total processing time: {processing_time:.2f}s\n"
 
-                if 'duration' in result and result['duration'] > 0:
-                    rtf = result['duration'] / processing_time
+                # Calculate average real-time factor
+                total_duration = sum(r.get('duration', 0) for r in all_results)
+                if total_duration > 0:
+                    rtf = total_duration / processing_time
                     yield f"⚡ Real-time factor: {rtf:.1f}x\n"
 
-                yield f"🗣️  Detected language: {result.get('language', 'unknown')}\n"
+                # Show detected languages
+                languages = set(r.get('language', 'unknown') for r in all_results)
+                yield f"🗣️  Detected language(s): {', '.join(languages)}\n"
+
                 yield "\n" + "=" * 48 + "\n"
-                yield "📝 TRANSCRIPTION RESULT:\n"
+                yield "📝 TRANSCRIPTION RESULT(S):\n"
                 yield "=" * 48 + "\n\n"
 
                 # Format response based on requested format
-                if response_format == "text":
-                    yield result.get('text', '')
-                elif response_format == "md" or response_format == "markdown":
-                    yield generate_markdown(result, model, processing_time, filename=file.filename)
+                if len(all_results) == 1:
+                    # Single result
+                    result = all_results[0]
+                    if response_format == "text":
+                        yield result.get('text', '')
+                    elif response_format == "md" or response_format == "markdown":
+                        yield generate_markdown(result, model, processing_time, filename=result.get('source_file', media_name))
+                    else:
+                        # JSON format as readable text
+                        yield f"Text: {result.get('text', '')}\n"
+                        yield f"Language: {result.get('language', 'auto')}\n"
+                        yield f"Model: {model}\n"
+                        if result.get('source_file'):
+                            yield f"Source: {result['source_file']}\n"
                 else:
-                    # JSON format come testo leggibile
-                    yield f"Text: {result.get('text', '')}\n"
-                    yield f"Language: {result.get('language', 'auto')}\n"
-                    yield f"Model: {model}\n"
+                    # Multiple results
+                    for i, result in enumerate(all_results, 1):
+                        yield f"\n--- File {i}: {result.get('source_file', f'file_{i}')} ---\n"
+                        if response_format == "text":
+                            yield result.get('text', '')
+                        elif response_format == "md" or response_format == "markdown":
+                            yield generate_markdown(result, model, processing_time, filename=result.get('source_file', f'file_{i}'))
+                        else:
+                            # JSON format as readable text
+                            yield f"Text: {result.get('text', '')}\n"
+                            yield f"Language: {result.get('language', 'auto')}\n"
+                        yield "\n"
 
             except Exception as e:
-                yield f"❌ Transcription failed: {e}\n"
+                yield f"❌ Transcription failed: {str(e)}\n"
+
+            finally:
+                # Clean up temporary files and directories
+                for temp_file in temp_files_to_cleanup:
+                    try:
+                        if os.path.exists(temp_file):
+                            os.unlink(temp_file)
+                    except Exception:
+                        pass  # Ignore cleanup errors
+
+                for temp_dir in temp_dirs_to_cleanup:
+                    try:
+                        if os.path.exists(temp_dir):
+                            import shutil
+                            shutil.rmtree(temp_dir)
+                    except Exception:
+                        pass  # Ignore cleanup errors
 
         return StreamingResponse(
             transcribe_generator_mlx(),
@@ -841,100 +1188,133 @@ async def transcribe_audio_mlx(
             }
         )
 
-    # Normal mode (non-streaming) for MLX-Whisper
-    # Validate file
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
-    file_ext = Path(file.filename).suffix.lower()
-    if file_ext not in SUPPORTED_FORMATS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported format: {file_ext}. Supported: {', '.join(SUPPORTED_FORMATS)}"
-        )
-
-    # Check file size
-    if len(file_content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large: {len(file_content)} bytes. Max: {MAX_FILE_SIZE} bytes"
-        )
-
-    # MLX-Whisper loads models automatically
-
-    # Transcribe
+    # Non-streaming mode - process media and transcribe
     try:
-        with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
-            tmp_file.write(file_content)
-            tmp_file.flush()
+        # Process different media types
+        local_audio_path = None
+        downloaded_files = []
+        cleanup_files = []
 
-            # Prepare transcription options
-            transcribe_options = {}
-            if language:
-                transcribe_options['language'] = language
-            if temperature != 0.0:
-                transcribe_options['temperature'] = temperature
+        if media_type == 'local_file':
+            if hasattr(media_input, 'read'):
+                # UploadFile - file_content was already read above
+                if len(file_content) > MAX_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large: {format_size(len(file_content))}"
+                    )
 
-            # Transcribe using MLX-Whisper
-            import mlx_whisper
+                if file_ext not in SUPPORTED_FORMATS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Unsupported format: {file_ext}. Supported: {', '.join(SUPPORTED_FORMATS)}"
+                    )
 
-            # Map model name to MLX-Whisper format
-            mlx_model = MLX_WHISPER_MODEL_MAPPING.get(model, model)
-            transcribe_options['path_or_hf_repo'] = mlx_model
+                # Create temp file
+                tmp_file = tempfile.NamedTemporaryFile(suffix=file_ext, delete=False)
+                tmp_file.write(file_content)
+                tmp_file.flush()
+                tmp_file.close()
+                local_audio_path = tmp_file.name
+                cleanup_files.append(local_audio_path)
 
-            # Use progress streaming but don't show progress (non-streaming mode)
-            result = None
-            for item in transcribe_with_progress_streaming(tmp_file.name, mlx_model, transcribe_options):
-                if not isinstance(item, str):  # Result object (not progress string)
-                    result = item
+            else:
+                # Local file path
+                if not os.path.exists(media_input):
+                    raise HTTPException(status_code=404, detail=f"File not found: {media_input}")
+                local_audio_path = media_input
 
-            # DON'T delete the temp file here - let the context manager handle it
+        elif media_type in ['youtube_video', 'youtube_playlist']:
+            download_info = download_youtube_audio(media_input, ".")
+
+            if download_info['type'] == 'playlist':
+                local_audio_path = download_info['files'][0]
+                downloaded_files.extend(download_info['files'])
+            else:
+                local_audio_path = download_info['filename']
+                downloaded_files.append(local_audio_path)
+
+        elif media_type == 'remote_audio':
+            local_audio_path = download_remote_audio(media_input, ".")
+            downloaded_files.append(local_audio_path)
+
+        if not local_audio_path or not os.path.exists(local_audio_path):
+            raise HTTPException(status_code=500, detail="Could not prepare audio file for transcription")
+
+        # Transcribe using MLX-Whisper
+        import mlx_whisper
+
+        mlx_model = MLX_WHISPER_MODEL_MAPPING.get(model, model)
+
+        # Prepare transcription options
+        transcribe_options = {
+            'path_or_hf_repo': mlx_model
+        }
+        if language:
+            transcribe_options['language'] = language
+        if temperature != 0.0:
+            transcribe_options['temperature'] = temperature
+
+        # Add word_timestamps for SRT/VTT support
+        if response_format in ["srt", "vtt"]:
+            transcribe_options['word_timestamps'] = True
+
+        # Transcribe
+        result = mlx_whisper.transcribe(local_audio_path, **transcribe_options)
+
+        processing_time = time.time() - start_time
+
+        # Cleanup temporary files
+        for cleanup_file in cleanup_files:
+            if os.path.exists(cleanup_file):
+                os.unlink(cleanup_file)
+
+        # Format response based on requested format
+        if response_format == "text":
+            return PlainTextResponse(result.get('text', ''))
+        elif response_format == "srt":
+            segments = result.get('segments', [])
+            if segments:
+                return PlainTextResponse(generate_srt(segments))
+            else:
+                text = result.get('text', '')
+                return PlainTextResponse(f"1\n00:00:00,000 --> 00:00:10,000\n{text}\n")
+        elif response_format == "vtt":
+            segments = result.get('segments', [])
+            if segments:
+                return PlainTextResponse(generate_vtt(segments))
+            else:
+                text = result.get('text', '')
+                return PlainTextResponse(f"WEBVTT\n\n00:00:00.000 --> 00:00:10.000\n{text}\n")
+        elif response_format == "md" or response_format == "markdown":
+            return PlainTextResponse(generate_markdown(result, model, processing_time, filename=media_name))
+        else:
+            # Enhanced JSON format (default)
+            response_data = {
+                "text": result.get('text', ''),
+                "language": result.get('language', language or 'auto'),
+                "model": model,
+                "processing_time": round(processing_time, 2),
+                "file_duration": result.get('duration', 0),
+                "real_time_factor": round(result.get('duration', 0) / processing_time, 1) if processing_time > 0 else 0,
+                "segments": result.get('segments', []),
+                "words": result.get('words', []) if 'words' in result else None,
+                "framework": "MLX-Whisper",
+                "media_type": media_type,
+                "media_source": media_name
+            }
+
+            if downloaded_files:
+                response_data["downloaded_files"] = downloaded_files
+
+            return response_data
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
-
-    processing_time = time.time() - start_time
-
-    # Format response based on requested format
-    if response_format == "text":
-        return result.get('text', '')
-    elif response_format == "srt":
-        segments = result.get('segments', [])
-        if segments:
-            return generate_srt(segments)
-        else:
-            # Fallback for models without segment info
-            text = result.get('text', '')
-            return f"1\n00:00:00,000 --> 00:00:10,000\n{text}\n"
-    elif response_format == "vtt":
-        segments = result.get('segments', [])
-        if segments:
-            return generate_vtt(segments)
-        else:
-            # Fallback for models without segment info
-            text = result.get('text', '')
-            return f"WEBVTT\n\n00:00:00.000 --> 00:00:10.000\n{text}\n"
-    elif response_format == "md" or response_format == "markdown":
-        return generate_markdown(result, model, processing_time, filename=file.filename)
-    else:
-        # Enhanced JSON format (default)
-        response_data = {
-            "text": result.get('text', ''),
-            "language": result.get('language', language or 'auto'),
-            "model": model,
-            "processing_time": round(processing_time, 2),
-            "file_duration": result.get('duration', 0),
-            "real_time_factor": round(result.get('duration', 0) / processing_time, 1) if processing_time > 0 else 0,
-            "segments": result.get('segments', []),
-            "words": result.get('words', []) if 'words' in result else None,
-            "framework": "MLX-Whisper"
-        }
-
-        # Add status message when verbose is True
-        if verbose and status_msg:
-            response_data["status"] = status_msg
-
-        return response_data
+        # Cleanup on error
+        for cleanup_file in cleanup_files:
+            if os.path.exists(cleanup_file):
+                os.unlink(cleanup_file)
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 @app.post("/transcribe/url")
 async def transcribe_url(
