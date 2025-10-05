@@ -2,14 +2,14 @@
 name = "whisper-mlx-api"
 version = "1.0.0"
 description = "Lightning Fast MLX Whisper API Server"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
     "fastapi",
     "uvicorn",
     "lightning-whisper-mlx",
     "python-multipart",
     "mlx-whisper>=0.4.3",
-    "yt-dlp>=2024.10.22",
+    "yt-dlp==2025.08.11",
 ]
 
 [tool.hatch.build.targets.wheel]

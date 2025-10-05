@@ -422,6 +422,30 @@ def download_youtube_audio(url: str, output_dir: str = ".") -> Dict[str, Any]:
                     'preferredquality': '192',
                 }],
                 'quiet': True,
+                'no_warnings': True,
+                'extractaudio': True,
+                'audioformat': 'mp3',
+                'embed_subs': False,
+                'writesubtitles': False,
+                # Modern browser headers to avoid detection
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Accept-Encoding': 'gzip,deflate',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                },
+                # Increased retry counts for playlists
+                'extractor_retries': 5,
+                'fragment_retries': 5,
+                'retry_sleep_functions': {
+                    'fragment': lambda n: min(15, 3 * n),
+                    'extractor': lambda n: min(30, 2 * n),
+                },
+                'ignoreerrors': False,
+                'abort_on_error': True
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -437,7 +461,7 @@ def download_youtube_audio(url: str, output_dir: str = ".") -> Dict[str, Any]:
             }
 
         else:
-            # Single video download
+            # Single video download - improved configuration for reliability
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
@@ -446,20 +470,112 @@ def download_youtube_audio(url: str, output_dir: str = ".") -> Dict[str, Any]:
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'quiet': True,
+                'quiet': False,  # Enable output for debugging
+                'no_warnings': False,
+                'extractaudio': True,
+                'audioformat': 'mp3',
+                'embed_subs': False,
+                'writesubtitles': False,
+                'cookiefile': None,
+                # Modern browser headers to avoid detection
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Accept-Encoding': 'gzip,deflate',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                },
+                # Increased retry counts and sleep functions
+                'extractor_retries': 5,
+                'fragment_retries': 5,
+                'retry_sleep_functions': {
+                    'fragment': lambda n: min(15, 3 * n),
+                    'extractor': lambda n: min(30, 2 * n),
+                },
+                # Additional reliability options
+                'ignoreerrors': False,
+                'abort_on_error': True,
+                # Anti-detection measures
+                'sleep_interval': 1,
+                'max_sleep_interval': 5,
+                'sleep_interval_requests': 1,
+                'skip_unavailable_fragments': True
             }
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url)
-                title = safe_filename(info.get('title', 'video'))
-                filename = os.path.join(output_dir, f"{title}.mp3")
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url)
+                    title = safe_filename(info.get('title', 'video'))
+                    filename = os.path.join(output_dir, f"{title}.mp3")
 
-            return {
-                'type': 'single',
-                'title': title,
-                'filename': filename,
-                'duration': info.get('duration', 0)
-            }
+                return {
+                    'type': 'single',
+                    'title': title,
+                    'filename': filename,
+                    'duration': info.get('duration', 0)
+                }
+            except Exception as first_error:
+                # Fallback: try with minimal config similar to command line
+                logger.warning(f"First attempt failed: {first_error}. Trying fallback configuration...")
+
+                fallback_opts = {
+                    'format': 'bestaudio/best',
+                    'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                    }],
+                    'extractaudio': True,
+                    'quiet': False,
+                    # Add additional anti-detection measures for fallback
+                    'sleep_interval': 1,
+                    'max_sleep_interval': 5,
+                    'sleep_interval_requests': 1,
+                    'extractor_retries': 10,
+                    'fragment_retries': 10,
+                    'skip_unavailable_fragments': True,
+                }
+
+                try:
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        info = ydl.extract_info(url)
+                        title = safe_filename(info.get('title', 'video'))
+                        filename = os.path.join(output_dir, f"{title}.mp3")
+
+                    return {
+                        'type': 'single',
+                        'title': title,
+                        'filename': filename,
+                        'duration': info.get('duration', 0)
+                    }
+                except Exception as second_error:
+                    # Final fallback: exact command line equivalent
+                    logger.warning(f"Second attempt failed: {second_error}. Trying exact command line equivalent...")
+
+                    cmdline_opts = {
+                        'format': 'bestaudio/best',
+                        'outtmpl': os.path.join(output_dir, 'test_audio.%(ext)s'),
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                        }],
+                        'extractaudio': True,
+                    }
+
+                    with yt_dlp.YoutubeDL(cmdline_opts) as ydl:
+                        info = ydl.extract_info(url)
+                        title = safe_filename(info.get('title', 'video'))
+                        # Use the actual downloaded filename
+                        filename = os.path.join(output_dir, "test_audio.mp3")
+
+                    return {
+                        'type': 'single',
+                        'title': title,
+                        'filename': filename,
+                        'duration': info.get('duration', 0)
+                    }
 
     except ImportError:
         raise HTTPException(
