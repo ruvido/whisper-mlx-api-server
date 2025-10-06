@@ -56,7 +56,7 @@ fi
 
 echo -e "${GREEN}🎯 API will be available at:${NC}"
 echo -e "   ${BLUE}http://localhost:${PORT}${NC} (local)"
-echo -e "   ${BLUE}http://$(hostname -I | awk '{print $1}'):${PORT}${NC} (network)"
+echo -e "   ${BLUE}http://$(ipconfig getifaddr en0 2>/dev/null || echo "localhost"):${PORT}${NC} (network)"
 echo ""
 echo -e "${GREEN}📖 API Documentation:${NC}"
 echo -e "   ${BLUE}http://localhost:${PORT}/docs${NC} (Swagger UI)"
