@@ -1,165 +1,283 @@
-# 🚀 Lightning MLX Whisper API
+# 🎙️ Whisper MLX API - Trascrizione Audio Ultrarapida per Apple Silicon
 
-Ultra-fast speech-to-text API server optimized for Apple Silicon with **dual Whisper implementations**.
+API server di trascrizione audio ottimizzato per Apple Silicon, con supporto specializzato per l'**italiano**.
 
-## ⚡ Performance
+## ⚡ Caratteristiche Principali
 
-- **27x real-time** transcription speed on Mac M4
-- **10x faster** than Whisper CPP
-- **Dual endpoints** for maximum flexibility
-- Full hardware acceleration with Apple's Neural Engine
+- **Ottimizzato per Apple Silicon** - Sfrutta completamente MLX e Neural Engine
+- **Modelli specializzati per l'italiano** - turbo-it, italian-turbo, distil-it
+- **Supporto universale media** - File locali, YouTube, URL remoti
+- **Streaming real-time** - Vedi i progressi durante la trascrizione
+- **Formati multipli** - JSON, text, SRT, VTT, Markdown
 
-## 🛠️ Installation
+## 🌐 Modelli Disponibili
 
-### Prerequisites
-- macOS with Apple Silicon (M1/M2/M3/M4)
-- Python 3.9+ (managed by UV)
-- FFmpeg (installed automatically)
+| Modello | Tipo | Lingua | Raccomandato per |
+|---------|------|--------|------------------|
+| `tiny` | Veloce | Multilingua | Test rapidi |
+| `base` | Bilanciato | Multilingua | Uso generale |
+| `small` | Buono | Multilingua | Qualità media |
+| `medium` | **Default** | Multilingua | 🇮🇹 Italiano generico |
+| `large` | Massimo | Multilingua | Massima accuratezza |
+| `turbo` | Veloce | Multilingua | Performance |
+| **`turbo-it`** | **🏆 Ottimale** | **Italiano** | **✅ Consigliato italiano** |
+| `italian-turbo` | Ottimale | Italiano | Alternativa turbo-it |
+| `distil-it` | Accurato | Italiano | Italiano accurato |
+
+**Modello consigliato per italiano:** `turbo-it` (bofenghuang/whisper-large-v3-distil-it-v0.2)
+
+## 🛠️ Installazione
+
+### Prerequisiti
+- macOS con Apple Silicon (M1/M2/M3/M4)
+- Python 3.9+
+- FFmpeg (installato automaticamente)
 
 ### Quick Start
 
-1. **Clone the repository**:
-   ```bash
-   git clone <your-repo-url>
-   cd whisper-mlx-api
-   ```
+```bash
+# 1. Clona il repository
+git clone <your-repo-url>
+cd whisper-mlx-api
 
-2. **Install dependencies** (UV handles everything):
-   ```bash
-   uv sync
-   ```
+# 2. Installa dipendenze (UV gestisce tutto)
+uv sync
 
-3. **Start the server**:
-   ```bash
-   ./start_server.sh
-   ```
+# 3. Avvia il server
+./start_server.sh
+```
 
-## 🔌 API Usage
+Il server sarà disponibile su `http://localhost:8000`
 
-### Lightning Whisper MLX (Recommended)
+## 📡 Utilizzo API
+
+### Esempi Pratici per l'Italiano
+
+#### File locale con modello italiano
+```bash
+curl -X POST "http://localhost:8000/transcribe" \
+  -F "file=@audio.mp3" \
+  -F "model=turbo-it" \
+  -F "language=it"
+```
+
+#### Con streaming (vedi progresso in tempo reale)
 ```bash
 curl -N --no-buffer -X POST "http://localhost:8000/transcribe" \
   -F "file=@audio.mp3" \
-  -F "model=turbo" \
+  -F "model=turbo-it" \
   -F "language=it" \
   -F "stream=true"
 ```
 
-### MLX-Whisper with Universal Media Support
+#### Video YouTube
 ```bash
-# Local file
-curl -X POST "http://localhost:8000/transcribe/mlx" \
-  -F "media=@audio.mp3" \
-  -F "model=turbo"
-
-# YouTube video
-curl -X POST "http://localhost:8000/transcribe/mlx" \
-  -F "media=https://youtu.be/KygDdSZbGZk" \
-  -F "model=medium"
-
-# YouTube playlist
-curl -X POST "http://localhost:8000/transcribe/mlx" \
-  -F "media=https://youtube.com/playlist?list=..." \
-  -F "model=small"
-
-# Remote audio URL
-curl -X POST "http://localhost:8000/transcribe/mlx" \
-  -F "media=https://server.com/audio.mp3" \
-  -F "model=turbo"
+curl -X POST "http://localhost:8000/transcribe" \
+  -F "media=https://youtu.be/VIDEO_ID" \
+  -F "model=turbo-it" \
+  -F "language=it"
 ```
 
-## 📊 API Endpoints
+#### URL audio remoto
+```bash
+curl -X POST "http://localhost:8000/transcribe" \
+  -F "media=https://example.com/audio.mp3" \
+  -F "model=turbo-it" \
+  -F "language=it"
+```
+
+#### Output come sottotitoli SRT
+```bash
+curl -X POST "http://localhost:8000/transcribe" \
+  -F "file=@audio.mp3" \
+  -F "model=turbo-it" \
+  -F "language=it" \
+  -F "response_format=srt"
+```
+
+#### Output come Markdown
+```bash
+curl -X POST "http://localhost:8000/transcribe" \
+  -F "file=@audio.mp3" \
+  -F "model=turbo-it" \
+  -F "language=it" \
+  -F "response_format=markdown"
+```
+
+## 📊 Endpoint API
 
 ### Core Endpoints
-- `GET /` - Health check
-- `GET /health` - Detailed health status with MLX status
-- `GET /models` - List available models for both frameworks
-- `POST /transcribe` - **Lightning Whisper MLX** (fastest, file upload only)
-- `POST /transcribe/mlx` - **MLX-Whisper** (supports media parameter: files, YouTube, remote URLs)
 
-### Model Management
-- `POST /models/preload` - Preload model to cache for faster first use
-- `GET /cache/status` - Get cache status and statistics
-- `POST /cache/clear` - Clear runtime model cache
+- **`GET /`** - Health check
+- **`GET /health`** - Stato dettagliato con info MLX
+- **`GET /models`** - Lista modelli disponibili
+- **`POST /transcribe`** - Trascrizione audio (supporta file e media)
 
-### Output Formats
-- **json**: Enhanced JSON with segments and metadata (default)
-- **text**: Plain text transcription
-- **srt**: SRT subtitle format with proper timestamps
-- **vtt**: WebVTT subtitle format
-- **md/markdown**: Markdown with metadata and timestamped segments
+### Parametri `/transcribe`
 
-### Model Caching
-- **Location**: `~/.cache/huggingface/hub/`
-- **Behavior**: Models download once and persist across restarts
-- **Runtime Cache**: Models stay loaded in memory for faster repeated use
+| Parametro | Tipo | Default | Descrizione |
+|-----------|------|---------|-------------|
+| `file` | UploadFile | - | File audio da trascrivere |
+| `media` | str | - | URL YouTube o audio remoto |
+| `model` | str | `"medium"` | Modello da usare |
+| `language` | str | auto | Lingua (es: `"it"`) |
+| `temperature` | float | `0.0` | Temperature per sampling |
+| `response_format` | str | `"json"` | Formato output |
+| `stream` | bool | `false` | Streaming real-time |
+| `verbose` | bool | `false` | Output dettagliato |
 
-## ⚙️ Configuration
+**Note:**
+- Usa `file` per file locali (multipart form upload)
+- Usa `media` per YouTube URL o remote audio URL
 
-Copy `.env.example` to `.env` and customize:
+### Formati Output
+
+| Formato | Descrizione | Uso |
+|---------|-------------|-----|
+| `json` | JSON completo con segments, timestamps, metadata | Default, più completo |
+| `text` | Solo testo trascritto | Semplice, leggibile |
+| `srt` | Sottotitoli SRT con timestamps | Video editing |
+| `vtt` | WebVTT subtitles | Web player |
+| `markdown` | Markdown con frontmatter YAML | Documentazione |
+
+### Formati Audio Supportati
+
+MP3, WAV, M4A, FLAC, OGG, MP4, MOV
+
+Dimensione massima: 100MB
+
+## 📈 Esempio Response (JSON)
+
+```json
+{
+  "text": "Ciao, questo è un test di trascrizione in italiano.",
+  "language": "it",
+  "model": "turbo-it",
+  "processing_time": 1.2,
+  "file_duration": 30.0,
+  "real_time_factor": 25.0,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 3.5,
+      "text": "Ciao, questo è un test"
+    }
+  ],
+  "framework": "MLX-Whisper",
+  "media_type": "local_file"
+}
+```
+
+## 🔧 Deployment Produzione
+
+### macOS (launchd)
+
+```bash
+# Copia il file plist
+cp com.whisper-mlx-api.plist ~/Library/LaunchAgents/
+
+# Carica il servizio
+launchctl load ~/Library/LaunchAgents/com.whisper-mlx-api.plist
+
+# Avvia automaticamente al login
+launchctl enable gui/$UID/com.whisper-mlx-api
+```
+
+### Configurazione
+
+Copia `.env.example` in `.env` e personalizza:
 
 ```bash
 cp .env.example .env
 ```
 
-## 🎯 Supported Inputs
-
-**Audio Formats**: MP3, WAV, M4A, FLAC, OGG, MP4, MOV
-**Media Sources**: Local files, YouTube videos/playlists, remote audio URLs
-
-## 📈 Response Format
-
-```json
-{
-  "text": "Transcribed text here",
-  "language": "en",
-  "model": "distil-medium.en",
-  "processing_time": 1.2,
-  "file_duration": 30.0,
-  "real_time_factor": 25.0
-}
-```
-
-## 🔧 Production Deployment
-
-### Using systemd (Linux-like)
-```bash
-sudo cp whisper-mlx-api.service /etc/systemd/system/
-sudo systemctl enable whisper-mlx-api
-sudo systemctl start whisper-mlx-api
-```
-
-### Using launchd (macOS)
-```bash
-cp com.whisper-mlx-api.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.whisper-mlx-api.plist
-```
+Variabili disponibili:
+- `HOST=0.0.0.0`
+- `PORT=8000`
+- `LOG_LEVEL=info`
 
 ## 🚨 Troubleshooting
 
-### MLX Not Available
-- Ensure you're on Apple Silicon Mac
-- Check: `python -c "import mlx.core; print('MLX OK')"`
+### MLX Non Disponibile
+
+Assicurati di essere su Mac Apple Silicon:
+```bash
+python -c "import mlx.core as mx; print(f'MLX OK: {mx.default_device()}')"
+```
+
+Se MLX non è disponibile:
+```bash
+uv add mlx mlx-whisper
+```
 
 ### Performance Issues
-- Use `distil-medium.en` for best speed/accuracy balance
-- Increase batch_size for longer audio files
-- Ensure sufficient RAM (8GB+ recommended)
 
-### Memory Issues
-- Reduce batch_size in configuration
-- Use smaller models (tiny, small)
-- Monitor with `top` or Activity Monitor
+- **Usa modelli più piccoli** per file lunghi: `tiny`, `base`, `small`
+- **Aumenta RAM disponibile** (consigliato 8GB+)
+- **Chiudi altre app** per liberare Neural Engine
+- **Modello consigliato per italiano**: `turbo-it` (veloce e accurato)
 
-## 📝 Development
+### Errori comuni
+
+**"Model not found"**
+- Il modello viene scaricato al primo uso
+- Controlla la connessione internet
+- Cache: `~/.cache/huggingface/hub`
+
+**"File too large"**
+- Limite: 100MB
+- Comprimi o dividi il file audio
+
+**"Unsupported format"**
+- Formati supportati: MP3, WAV, M4A, FLAC, OGG, MP4, MOV
+- Converti con ffmpeg se necessario
+
+## 📝 Sviluppo
 
 ```bash
-# Install dev dependencies
+# Installa dipendenze dev
 uv sync --extra dev
 
-# Run tests
+# Esegui test
 uv run pytest
 
-# Development server (auto-reload)
+# Server con auto-reload
 uv run uvicorn whisper_api:app --reload --host 0.0.0.0 --port 8000
+
+# Controlla health
+curl http://localhost:8000/health
 ```
+
+## 🎯 Cache dei Modelli
+
+I modelli vengono scaricati automaticamente da HuggingFace al primo utilizzo e salvati in:
+
+```
+~/.cache/huggingface/hub/
+```
+
+Una volta scaricati, vengono riutilizzati per le successive trascrizioni.
+
+**Pulizia cache:**
+```bash
+rm -rf ~/.cache/huggingface/hub/models--*whisper*
+```
+
+## 🌟 Best Practices
+
+1. **Per italiano**: Usa sempre `model=turbo-it` e `language=it`
+2. **Streaming**: Usa `stream=true` per file lunghi
+3. **Formati**: Preferisci MP3 o M4A per le migliori performance
+4. **Batch**: Per molti file, riutilizza la stessa sessione server
+
+## 🤝 Contributi
+
+Contributi benvenuti! Apri una issue o una pull request.
+
+## 📄 Licenza
+
+MIT License
+
+---
+
+**🇮🇹 Ottimizzato per la lingua italiana | Powered by MLX-Whisper**

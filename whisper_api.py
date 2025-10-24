@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Lightning Fast MLX Whisper API Server
-Optimized for Apple Silicon with 27x real-time performance
+MLX Whisper API Server
+Fast speech-to-text API optimized for Apple Silicon
 """
 
 import contextlib
@@ -32,41 +32,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-DEFAULT_MODEL = "distil-medium.en"
-DEFAULT_BATCH_SIZE = 12
+DEFAULT_MODEL = "medium"
 SUPPORTED_FORMATS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".mp4", ".mov"}
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
-# Cache for loaded models
-_model_cache: Dict[str, Any] = {}
-
-# Model mapping for Lightning Whisper MLX
-MODEL_MAPPING = {
-    "tiny": "tiny",
-    "tiny.en": "tiny.en",
-    "base": "base",
-    "base.en": "base.en",
-    "small": "small",
-    "small.en": "small.en",
-    "medium": "medium",
-    "medium.en": "medium.en",
-    "large": "large",
-    "large-v1": "large-v1",
-    "large-v2": "large-v2",
-    "large-v3": "large-v3",
-    "distil-small.en": "distil-small.en",
-    "distil-medium.en": "distil-medium.en",
-    "distil-large-v2": "distil-large-v2",
-    "distil-large-v3": "distil-large-v3",
-    "turbo": "distil-large-v3",
-    # Italian specialized models
-    "turbo-it": "bofenghuang/whisper-large-v3-distil-it-v0.2",
-    "italian-turbo": "bofenghuang/whisper-large-v3-distil-it-v0.2",
-    "distil-it": "bofenghuang/whisper-large-v3-distil-it-v0.2"
-}
-
 # Model mapping for MLX-Whisper (uses MLX Community models on HuggingFace)
-MLX_WHISPER_MODEL_MAPPING = {
+MODEL_MAPPING = {
     "tiny": "mlx-community/whisper-tiny",
     "tiny.en": "mlx-community/whisper-tiny.en",
     "base": "mlx-community/whisper-base",
@@ -80,7 +51,7 @@ MLX_WHISPER_MODEL_MAPPING = {
     "large-v2": "mlx-community/whisper-large-v3-mlx",
     "large-v3": "mlx-community/whisper-large-v3-mlx",
     "turbo": "mlx-community/whisper-turbo",
-    # Custom models (pass through as-is)
+    # Italian specialized models
     "bofenghuang/whisper-large-v3-distil-it-v0.2": "bofenghuang/whisper-large-v3-distil-it-v0.2",
     "turbo-it": "bofenghuang/whisper-large-v3-distil-it-v0.2",
     "italian-turbo": "bofenghuang/whisper-large-v3-distil-it-v0.2",
@@ -101,7 +72,7 @@ class TranscriptionResponse(BaseModel):
     real_time_factor: float
     segments: List[Dict[str, Any]]
     words: Optional[List[Dict[str, Any]]] = None
-    framework: str = "Lightning Whisper MLX"
+    framework: str = "MLX-Whisper"
     media_type: Optional[str] = None
     media_source: Optional[str] = None
     downloaded_files: Optional[List[str]] = None
@@ -118,18 +89,12 @@ class HealthResponse(BaseModel):
     models_loaded: Optional[bool] = None
     error: Optional[str] = None
 
-class ModelInfo(BaseModel):
-    """Model information model"""
+class ModelsResponse(BaseModel):
+    """Models listing response model"""
     available_models: List[str]
     default_model: str
     recommended: str
     endpoint: str
-
-class ModelsResponse(BaseModel):
-    """Models listing response model"""
-    lightning_whisper_mlx: ModelInfo
-    mlx_whisper: ModelInfo
-    loaded_models: List[str]
     cache_location: str
 
 # =============================================================================
@@ -318,81 +283,13 @@ class MediaProcessor:
 # =============================================================================
 
 class WhisperService:
-    """Handles Whisper model loading and transcription"""
-
-    @staticmethod
-    def get_model(model: str = DEFAULT_MODEL, batch_size: int = DEFAULT_BATCH_SIZE, verbose: bool = False):
-        """Lazy load the whisper model with caching"""
-        mapped_model = MODEL_MAPPING.get(model, model)
-        cache_key = f"{mapped_model}_{batch_size}"
-
-        status_msg = ""
-        if cache_key not in _model_cache:
-            try:
-                from lightning_whisper_mlx import LightningWhisperMLX
-                import glob
-
-                cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-                os.makedirs(cache_dir, exist_ok=True)
-
-                model_pattern = f"*{mapped_model}*"
-                existing_files = [
-                    pattern_path for pattern_path in
-                    glob.glob(os.path.join(cache_dir, "**", model_pattern), recursive=True)
-                    if os.path.isfile(pattern_path)
-                ]
-
-                if existing_files:
-                    status_msg = f"📦 Model '{mapped_model}' already cached, loading..."
-                else:
-                    status_msg = f"🔄 Downloading model '{mapped_model}' (first time)..."
-
-                logger.info(status_msg)
-
-                _model_cache[cache_key] = LightningWhisperMLX(
-                    model=mapped_model,
-                    batch_size=batch_size,
-                    quant=None
-                )
-
-                success_msg = f"✅ Model '{mapped_model}' loaded successfully!"
-                logger.info(success_msg)
-                if verbose:
-                    status_msg += f"\n{success_msg}"
-
-            except ImportError as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Lightning Whisper MLX not available: {e}. Install with 'uv add lightning-whisper-mlx'"
-                )
-            except Exception as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to load Whisper model '{mapped_model}': {e}"
-                )
-        else:
-            status_msg = f"⚡ Model '{mapped_model}' already loaded in memory"
-
-        return _model_cache[cache_key], status_msg if verbose else ""
-
-    @staticmethod
-    def prepare_transcription_options(language: Optional[str], temperature: float) -> Dict[str, Any]:
-        """Prepare transcription options"""
-        options = {'task': 'transcribe'}
-        if language:
-            options['language'] = language
-        if temperature != 0.0:
-            options['temperature'] = temperature
-        return options
-
-class MLXWhisperService:
     """Handles MLX-Whisper transcription"""
 
     @staticmethod
-    def prepare_mlx_options(model: str, language: Optional[str], temperature: float, response_format: str) -> Dict[str, Any]:
+    def prepare_options(model: str, language: Optional[str], temperature: float, response_format: str) -> Dict[str, Any]:
         """Prepare MLX-Whisper transcription options"""
-        mlx_model = MLX_WHISPER_MODEL_MAPPING.get(model, model)
-        options = {'path_or_hf_repo': mlx_model}
+        model_path = MODEL_MAPPING.get(model, model)
+        options = {'path_or_hf_repo': model_path}
 
         if language:
             options['language'] = language
@@ -564,8 +461,8 @@ def format_size(bytes_size: int) -> str:
 # =============================================================================
 
 app = FastAPI(
-    title="Lightning MLX Whisper API",
-    description="Ultra-fast speech-to-text API using Apple's MLX framework",
+    title="MLX Whisper API",
+    description="Fast speech-to-text API using Apple's MLX framework",
     version="1.0.0"
 )
 
@@ -587,7 +484,7 @@ async def root() -> HealthResponse:
     """Health check endpoint"""
     return HealthResponse(
         status="healthy",
-        message="Lightning MLX Whisper API is running",
+        message="MLX Whisper API is running",
         version="1.0.0",
         hardware="Apple Silicon with MLX acceleration"
     )
@@ -600,8 +497,7 @@ async def health_check() -> HealthResponse:
         return HealthResponse(
             status="healthy",
             mlx_available=True,
-            mlx_device=str(mx.default_device()),
-            models_loaded=bool(_model_cache)
+            mlx_device=str(mx.default_device())
         )
     except ImportError:
         return HealthResponse(
@@ -614,114 +510,15 @@ async def health_check() -> HealthResponse:
 async def list_models() -> ModelsResponse:
     """List available Whisper models"""
     return ModelsResponse(
-        lightning_whisper_mlx=ModelInfo(
-            available_models=list(MODEL_MAPPING.keys()),
-            default_model=DEFAULT_MODEL,
-            recommended="distil-medium.en (fast and accurate)",
-            endpoint="/transcribe"
-        ),
-        mlx_whisper=ModelInfo(
-            available_models=list(MLX_WHISPER_MODEL_MAPPING.keys()),
-            default_model="medium",
-            recommended="tiny (fastest), medium (balanced), turbo (best quality)",
-            endpoint="/transcribe/mlx"
-        ),
-        loaded_models=list(_model_cache.keys()),
+        available_models=list(MODEL_MAPPING.keys()),
+        default_model=DEFAULT_MODEL,
+        recommended="tiny (fastest), medium (balanced), turbo-it (best for Italian)",
+        endpoint="/transcribe",
         cache_location=os.path.expanduser("~/.cache/huggingface/hub")
     )
 
 @app.post("/transcribe", response_model=None)
 async def transcribe_audio(
-    file: UploadFile = File(...),
-    model: Optional[str] = Form(DEFAULT_MODEL),
-    language: Optional[str] = Form(None),
-    temperature: Optional[float] = Form(0.0),
-    response_format: Optional[str] = Form("json"),
-    verbose: Optional[bool] = Form(False),
-    stream: Optional[bool] = Form(False)
-) -> Union[StreamingResponse, PlainTextResponse, Dict[str, Any]]:
-    """
-    Transcribe audio file using Lightning Whisper MLX with hardware acceleration
-    """
-    start_time = time.time()
-
-    # Read file content
-    file_content = await file.read()
-
-    # Handle streaming mode
-    if stream:
-        def streaming_generator():
-            # Validate and process file
-            try:
-                temp_file_path = MediaProcessor.process_uploaded_file(file, file_content)
-                yield f"📁 File: {file.filename} ({format_size(len(file_content))})\n"
-                yield f"🤖 Model: {model}\n"
-                if language:
-                    yield f"🗣️ Language: {language}\n"
-                yield "\n"
-
-                # Load model
-                yield "🔄 Loading model...\n"
-                whisper, status_msg = WhisperService.get_model(model, verbose=True)
-                yield "✅ Model loaded!\n"
-
-                # Transcribe
-                yield "🎯 Starting transcription...\n"
-                options = WhisperService.prepare_transcription_options(language, temperature)
-                result = whisper.transcribe(temp_file_path, **options)
-
-                processing_time = time.time() - start_time
-                yield f"✅ Completed in {processing_time:.2f}s\n\n"
-
-                # Format output
-                if response_format == "text":
-                    yield result.get('text', '')
-                elif response_format in ["md", "markdown"]:
-                    yield ResponseFormatter.generate_markdown(result, model, processing_time, filename=file.filename)
-                else:
-                    yield f"Text: {result.get('text', '')}\n"
-                    yield f"Language: {result.get('language', 'auto')}\n"
-
-                # Cleanup
-                os.unlink(temp_file_path)
-
-            except Exception as e:
-                yield f"❌ Error: {str(e)}\n"
-
-        return StreamingResponse(
-            streaming_generator(),
-            media_type="text/plain",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
-        )
-
-    # Non-streaming mode
-    try:
-        temp_file_path = MediaProcessor.process_uploaded_file(file, file_content)
-        whisper, status_msg = WhisperService.get_model(model, verbose=verbose)
-
-        options = WhisperService.prepare_transcription_options(language, temperature)
-        result = whisper.transcribe(temp_file_path, **options)
-
-        processing_time = time.time() - start_time
-
-        # Cleanup
-        os.unlink(temp_file_path)
-
-        return ResponseFormatter.format_transcription_response(
-            result, model, processing_time, response_format,
-            filename=file.filename,
-            status_msg=status_msg if verbose else None
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
-
-@app.post("/transcribe/mlx", response_model=None)
-async def transcribe_audio_mlx(
     media: Optional[str] = Form(None),
     file: Optional[UploadFile] = None,
     model: Optional[str] = Form("medium"),
@@ -807,14 +604,14 @@ async def transcribe_audio_mlx(
                 # Transcribe files
                 yield f"\n🎯 Starting transcription of {len(audio_files)} file(s)...\n"
 
-                options = MLXWhisperService.prepare_mlx_options(model, language, temperature, response_format)
+                options = WhisperService.prepare_options(model, language, temperature, response_format)
                 results = []
 
                 for i, audio_file in enumerate(audio_files, 1):
                     if len(audio_files) > 1:
                         yield f"📝 Processing file {i}/{len(audio_files)}: {os.path.basename(audio_file)}\n"
 
-                    result = MLXWhisperService.transcribe_file(audio_file, options)
+                    result = WhisperService.transcribe_file(audio_file, options)
                     results.append(result)
 
                     if len(audio_files) > 1:
@@ -911,11 +708,11 @@ async def transcribe_audio_mlx(
             cleanup_files.append(downloaded_file)
 
         # Transcribe
-        options = MLXWhisperService.prepare_mlx_options(model, language, temperature, response_format)
+        options = WhisperService.prepare_options(model, language, temperature, response_format)
         results = []
 
         for audio_file in audio_files:
-            result = MLXWhisperService.transcribe_file(audio_file, options)
+            result = WhisperService.transcribe_file(audio_file, options)
             results.append(result)
 
         processing_time = time.time() - start_time
