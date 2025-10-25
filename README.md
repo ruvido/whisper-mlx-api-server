@@ -2,6 +2,21 @@
 
 API server di trascrizione audio ottimizzato per Apple Silicon, con supporto specializzato per l'**italiano**.
 
+## 🚀 TL;DR - Quick Start
+
+```bash
+# 1. Avvia il server
+./start_server.sh
+
+# 2. Trascrivi un file audio in italiano (in un altro terminale)
+curl -X POST "http://localhost:8000/transcribe" \
+  -F "file=@tuofile.mp3" \
+  -F "model=turbo" \
+  -F "language=it"
+```
+
+Il server parte su `http://localhost:8000`. Il modello viene scaricato automaticamente al primo utilizzo.
+
 ## ⚡ Caratteristiche Principali
 
 - **Ottimizzato per Apple Silicon** - Sfrutta completamente MLX e Neural Engine
@@ -121,10 +136,9 @@ curl -X POST "http://localhost:8000/transcribe" \
 | `media` | str | - | URL YouTube o audio remoto |
 | `model` | str | `"medium"` | Modello da usare |
 | `language` | str | auto | Lingua (es: `"it"`) |
-| `temperature` | float | `0.0` | Temperature per sampling |
+| `temperature` | float | `0.0` | Temperature per sampling (0.0-1.0) |
 | `response_format` | str | `"json"` | Formato output |
 | `stream` | bool | `false` | Streaming real-time |
-| `verbose` | bool | `false` | Output dettagliato |
 
 **Note:**
 - Usa `file` per file locali (multipart form upload)
@@ -185,16 +199,17 @@ launchctl enable gui/$UID/com.whisper-mlx-api
 
 ### Configurazione
 
-Copia `.env.example` in `.env` e personalizza:
+Puoi configurare il server tramite variabili d'ambiente:
 
 ```bash
-cp .env.example .env
+# Esempio:
+HOST=0.0.0.0 PORT=8000 LOG_LEVEL=info ./start_server.sh
 ```
 
 Variabili disponibili:
-- `HOST=0.0.0.0`
-- `PORT=8000`
-- `LOG_LEVEL=info`
+- `HOST` (default: 0.0.0.0)
+- `PORT` (default: 8000)
+- `LOG_LEVEL` (default: info)
 
 ## 🚨 Troubleshooting
 
@@ -258,17 +273,28 @@ I modelli vengono scaricati automaticamente da HuggingFace al primo utilizzo e s
 
 Una volta scaricati, vengono riutilizzati per le successive trascrizioni.
 
-**Pulizia cache:**
+**⚡ Performance**: I modelli vengono caricati in memoria al primo utilizzo e mantenuti in cache. Le richieste successive con lo stesso modello sono **10-100x più veloci** perché il modello è già caricato.
+
+**Pulizia cache disco:**
 ```bash
 rm -rf ~/.cache/huggingface/hub/models--*whisper*
 ```
 
+**Pulizia cache memoria** (riavvia il server):
+```bash
+# Trova e termina il processo
+lsof -ti:8000 | xargs kill
+# Riavvia
+./start_server.sh
+```
+
 ## 🌟 Best Practices
 
-1. **Per italiano**: Usa sempre `model=turbo-it` e `language=it`
-2. **Streaming**: Usa `stream=true` per file lunghi
+1. **Per italiano**: Usa `model=turbo` e `language=it` (veloce e accurato)
+2. **Streaming**: Usa `stream=true` per file lunghi per vedere il progresso in tempo reale
 3. **Formati**: Preferisci MP3 o M4A per le migliori performance
-4. **Batch**: Per molti file, riutilizza la stessa sessione server
+4. **Performance**: Mantieni il server attivo - il modello rimane in cache per richieste successive 10-100x più veloci
+5. **Batch**: Per molti file, riutilizza la stessa sessione server
 
 ## 🤝 Contributi
 
