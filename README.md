@@ -6,7 +6,7 @@ API server di trascrizione audio ottimizzato per Apple Silicon, con supporto spe
 
 ```bash
 # 1. Avvia il server
-./start_server.sh
+./whisper-api-server.sh
 
 # 2. Trascrivi un file audio in italiano (in un altro terminale)
 curl -X POST "http://localhost:8000/transcribe" \
@@ -59,7 +59,7 @@ cd whisper-mlx-api
 uv sync
 
 # 3. Avvia il server
-./start_server.sh
+./whisper-api-server.sh
 ```
 
 Il server sarà disponibile su `http://localhost:8000`
@@ -203,7 +203,7 @@ Puoi configurare il server tramite variabili d'ambiente:
 
 ```bash
 # Esempio:
-HOST=0.0.0.0 PORT=8000 LOG_LEVEL=info ./start_server.sh
+HOST=0.0.0.0 PORT=8000 LOG_LEVEL=info ./whisper-api-server.sh
 ```
 
 Variabili disponibili:
@@ -285,7 +285,7 @@ rm -rf ~/.cache/huggingface/hub/models--*whisper*
 # Trova e termina il processo
 lsof -ti:8000 | xargs kill
 # Riavvia
-./start_server.sh
+./whisper-api-server.sh
 ```
 
 ## 🌟 Best Practices
