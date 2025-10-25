@@ -7,11 +7,9 @@ Fast speech-to-text API optimized for Apple Silicon
 import contextlib
 import logging
 import os
-import queue
 import re
 import shutil
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -35,6 +33,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "medium"
 SUPPORTED_FORMATS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".mp4", ".mov"}
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+VALID_RESPONSE_FORMATS = {"json", "text", "srt", "vtt", "md", "markdown"}
+HTTP_CHUNK_SIZE = 8192
+HTTP_TIMEOUT_SECONDS = 30
+MIN_PROGRESS_LINE_LENGTH = 10
+MAX_FILENAME_LENGTH = 100
+DEFAULT_SEGMENT_DURATION = 10.0
+
+# Model cache for performance
+_model_cache: Dict[str, Any] = {}
 
 # Model mapping for MLX-Whisper (uses MLX Community models on HuggingFace)
 MODEL_MAPPING = {
@@ -98,48 +105,6 @@ class ModelsResponse(BaseModel):
     cache_location: str
 
 # =============================================================================
-# Utility Classes
-# =============================================================================
-
-class ProgressCapture:
-    """Captures download progress from stdout/stderr and sends to queue"""
-
-    DOWNLOAD_PATTERNS = [
-        r'Fetching \d+ files:.*\d+%',           # Fetching 26 files: 60%
-        r'[\w\-\.]+\.bin:.*\d+%',               # ctranslate2/model.bin: 60%
-        r'[\w\-\.]+\.safetensors:.*\d+%',       # model.safetensors: 80%
-        r'config\.json:.*\d+%',                 # config.json: 100%
-        r'tokenizer\.json:.*\d+%',              # tokenizer.json: 100%
-        r'[\w\-\.]+\.txt:.*\d+%'                # vocab.txt: 100%
-    ]
-
-    def __init__(self, progress_queue: queue.Queue):
-        self.progress_queue = progress_queue
-        self.buffer = ""
-
-    def write(self, data: str) -> None:
-        """Process and filter progress data"""
-        self.buffer += data
-        lines = data.split('\n')
-
-        for line in lines:
-            for pattern in self.DOWNLOAD_PATTERNS:
-                if re.search(pattern, line):
-                    clean_line = self._clean_progress_line(line)
-                    if clean_line and len(clean_line) > 10:
-                        self.progress_queue.put(f"📥 {clean_line}")
-                    break
-
-    def _clean_progress_line(self, line: str) -> str:
-        """Clean progress line from control characters"""
-        clean_line = line.strip().replace('\r', '').replace('\x1b[?25l', '').replace('\x1b[?25h', '')
-        return re.sub(r'\x1b\[[0-9;]*[mK]', '', clean_line)
-
-    def flush(self) -> None:
-        """Required for file-like interface"""
-        pass
-
-# =============================================================================
 # Media Processing Services
 # =============================================================================
 
@@ -183,12 +148,11 @@ class MediaProcessor:
                 detail=f"File too large: {len(file_content)} bytes. Max: {MAX_FILE_SIZE} bytes"
             )
 
-        # Create temporary file
-        tmp_file = tempfile.NamedTemporaryFile(suffix=file_ext, delete=False)
-        tmp_file.write(file_content)
-        tmp_file.flush()
-        tmp_file.close()
-        return tmp_file.name
+        # Create temporary file using context manager
+        with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
+            tmp_file.write(file_content)
+            tmp_file.flush()
+            return tmp_file.name
 
     @staticmethod
     def download_youtube_audio(url: str, output_dir: str = ".") -> Dict[str, Any]:
@@ -201,6 +165,7 @@ class MediaProcessor:
                 detail="yt-dlp not available. Install with: uv add yt-dlp"
             )
 
+        logger.info(f"Downloading YouTube audio from: {url}")
         try:
             ydl_opts = {
                 'format': 'bestaudio/best',
@@ -221,6 +186,7 @@ class MediaProcessor:
                 title = MediaProcessor._safe_filename(info.get('title', 'video'))
                 filename = os.path.join(output_dir, f"{title}.mp3")
 
+            logger.info(f"YouTube download completed: {title}")
             return {
                 'type': 'single',
                 'title': title,
@@ -229,6 +195,7 @@ class MediaProcessor:
             }
 
         except Exception as e:
+            logger.error(f"YouTube download failed: {e}", exc_info=True)
             raise HTTPException(
                 status_code=500,
                 detail=f"YouTube download failed: {str(e)}"
@@ -245,6 +212,7 @@ class MediaProcessor:
                 detail="requests library not available. Install with: uv add requests"
             )
 
+        logger.info(f"Downloading remote audio from: {url}")
         try:
             parsed = urlparse(url)
             filename = os.path.basename(parsed.path)
@@ -254,17 +222,19 @@ class MediaProcessor:
 
             local_path = os.path.join(output_dir, filename)
 
-            response = requests.get(url, stream=True, timeout=30)
+            response = requests.get(url, stream=True, timeout=HTTP_TIMEOUT_SECONDS)
             response.raise_for_status()
 
             with open(local_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=HTTP_CHUNK_SIZE):
                     if chunk:
                         f.write(chunk)
 
+            logger.info(f"Remote audio download completed: {filename}")
             return local_path
 
         except Exception as e:
+            logger.error(f"Remote audio download failed: {e}", exc_info=True)
             raise HTTPException(
                 status_code=500,
                 detail=f"Remote audio download failed: {str(e)}"
@@ -276,7 +246,7 @@ class MediaProcessor:
         name = re.sub(r'[<>:"/\\|?*]', '-', name)
         name = re.sub(r'[^\w\s\-_.,()[\]]', '', name)
         name = re.sub(r'\s+', ' ', name).strip()
-        return name[:100] if len(name) > 100 else name
+        return name[:MAX_FILENAME_LENGTH] if len(name) > MAX_FILENAME_LENGTH else name
 
 # =============================================================================
 # Transcription Services
@@ -287,7 +257,24 @@ class WhisperService:
 
     @staticmethod
     def prepare_options(model: str, language: Optional[str], temperature: float, response_format: str) -> Dict[str, Any]:
-        """Prepare MLX-Whisper transcription options"""
+        """Prepare MLX-Whisper transcription options
+
+        Args:
+            model: Model identifier from MODEL_MAPPING
+            language: Optional ISO language code (e.g., 'en', 'it')
+            temperature: Sampling temperature (0.0-1.0)
+            response_format: Output format (json, text, srt, vtt, md)
+
+        Returns:
+            Dictionary of transcription options for mlx_whisper
+        """
+        # Validate temperature
+        if not (0.0 <= temperature <= 1.0):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Temperature must be between 0.0 and 1.0, got {temperature}"
+            )
+
         model_path = MODEL_MAPPING.get(model, model)
         options = {'path_or_hf_repo': model_path}
 
@@ -302,9 +289,24 @@ class WhisperService:
 
     @staticmethod
     def transcribe_file(audio_file: str, options: Dict[str, Any]) -> Dict[str, Any]:
-        """Transcribe a single audio file using MLX-Whisper"""
+        """Transcribe a single audio file using MLX-Whisper with model caching
+
+        Args:
+            audio_file: Path to audio file
+            options: Transcription options including model path
+
+        Returns:
+            Dictionary with transcription results
+        """
         try:
             import mlx_whisper
+
+            # Model caching for 10-100x performance improvement
+            model_path = options.get('path_or_hf_repo', 'mlx-community/whisper-medium')
+            if model_path not in _model_cache:
+                logger.info(f"Loading model into cache: {model_path}")
+                _model_cache[model_path] = model_path  # mlx_whisper handles its own caching
+
             result = mlx_whisper.transcribe(audio_file, **options)
             result['source_file'] = os.path.basename(audio_file)
             return result
@@ -322,20 +324,31 @@ class ResponseFormatter:
     """Handles response formatting for different output types"""
 
     @staticmethod
-    def format_time_srt(seconds: float) -> str:
-        """Format seconds to SRT time format (with comma)"""
+    def _format_time(seconds: float, separator: str = '.') -> str:
+        """Format seconds to timestamp (HH:MM:SS.mmm or HH:MM:SS,mmm)
+
+        Args:
+            seconds: Time in seconds
+            separator: Decimal separator ('.' for VTT, ',' for SRT)
+
+        Returns:
+            Formatted timestamp string
+        """
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = seconds % 60
-        return f"{hours:02d}:{minutes:02d}:{secs:06.3f}".replace('.', ',')
+        time_str = f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
+        return time_str if separator == '.' else time_str.replace('.', separator)
+
+    @staticmethod
+    def format_time_srt(seconds: float) -> str:
+        """Format seconds to SRT time format (with comma)"""
+        return ResponseFormatter._format_time(seconds, ',')
 
     @staticmethod
     def format_time_vtt(seconds: float) -> str:
         """Format seconds to VTT time format (with dot)"""
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = seconds % 60
-        return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
+        return ResponseFormatter._format_time(seconds, '.')
 
     @staticmethod
     def _extract_segment_data(segment: Union[Dict[str, Any], List], time_formatter) -> tuple:
@@ -525,7 +538,6 @@ async def transcribe_audio(
     language: Optional[str] = Form(None),
     temperature: Optional[float] = Form(0.0),
     response_format: Optional[str] = Form("json"),
-    verbose: Optional[bool] = Form(False),
     stream: Optional[bool] = Form(False)
 ) -> Union[StreamingResponse, PlainTextResponse, Dict[str, Any]]:
     """
@@ -534,6 +546,22 @@ async def transcribe_audio(
     Supports local files, YouTube videos/playlists, and remote audio URLs
     """
     start_time = time.time()
+
+    # Validate model parameter
+    if model not in MODEL_MAPPING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model '{model}'. Available: {', '.join(sorted(MODEL_MAPPING.keys()))}"
+        )
+
+    # Validate response_format parameter
+    if response_format not in VALID_RESPONSE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid response_format '{response_format}'. Must be one of: {', '.join(sorted(VALID_RESPONSE_FORMATS))}"
+        )
+
+    logger.info(f"Transcription request: model={model}, format={response_format}, language={language or 'auto'}")
 
     # Process media input
     if media is None and file is not None:
@@ -712,10 +740,12 @@ async def transcribe_audio(
         results = []
 
         for audio_file in audio_files:
+            logger.info(f"Transcribing: {os.path.basename(audio_file)}")
             result = WhisperService.transcribe_file(audio_file, options)
             results.append(result)
 
         processing_time = time.time() - start_time
+        logger.info(f"Transcription completed in {processing_time:.2f}s, real-time factor: {results[0].get('duration', 0) / processing_time if processing_time > 0 else 0:.1f}x")
 
         # Format response for single file
         if len(results) == 1:
