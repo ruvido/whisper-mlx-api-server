@@ -537,8 +537,8 @@ async def transcribe_audio(
     model: Optional[str] = Form("medium"),
     language: Optional[str] = Form(None),
     temperature: Optional[float] = Form(0.0),
-    response_format: Optional[str] = Form("json"),
-    stream: Optional[bool] = Form(False)
+    response_format: Optional[str] = Form("md"),
+    stream: Optional[bool] = Form(True)
 ) -> Union[StreamingResponse, PlainTextResponse, Dict[str, Any]]:
     """
     Transcribe audio using MLX-Whisper with automatic media detection
